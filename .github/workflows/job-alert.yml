@@ -1,1 +1,27 @@
-Hello World 
+name: Daily Job Alert
+on:
+  schedule:
+    - cron: "30 3 * * *"    # 03:30 UTC = 09:00 IST
+  workflow_dispatch:         # lets you run it manually
+
+jobs:
+  alert:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - run: pip install requests
+      # Persist seen.db between runs so you don't get duplicate emails
+      - uses: actions/cache@v4
+        with:
+          path: seen.db
+          key: seen-db-${{ github.run_id }}
+          restore-keys: seen-db-
+      - run: python job_alert.py
+        env:
+          ADZUNA_APP_ID:  ${{ secrets.ADZUNA_APP_ID }}
+          ADZUNA_APP_KEY: ${{ secrets.ADZUNA_APP_KEY }}
+          GMAIL_USER:     ${{ secrets.GMAIL_USER }}
+          GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
+          MAIL_TO:        ${{ secrets.MAIL_TO }}

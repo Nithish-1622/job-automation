@@ -1,13 +1,13 @@
-import os, re, json, sqlite3, smtplib, hashlib, datetime as dt
+import os, re, json, time, sqlite3, smtplib, hashlib, datetime as dt
 from email.mime.text import MIMEText
 import requests
-from google import genai
-from google.genai import types
+from groq import Groq
 
-MODEL = "gemini-2.5-flash"   # free tier; check aistudio.google.com for current names
+MODEL = "groq/compound"      # Groq model with built-in web search; verify at console.groq.com/docs/models
 LOOKBACK_DAYS = 7
 MAX_PER_RUN = 60
 TIMEOUT = 20
+SLEEP_BETWEEN = 5            # seconds between categories, to respect free-tier per-minute limits
 HEADERS = {"User-Agent": "Mozilla/5.0 (placement-alert)"}
 DB_PATH = "seen_llm.db"      # separate from seen.db used by job_alert.py
 
@@ -49,18 +49,15 @@ def parse_json_array(text):
         return []
     return [d for d in data if isinstance(d, dict)]
 
-# ---- LLM web search (Gemini + Google Search grounding) ----------------------
+# ---- LLM web search (Groq compound model) -----------------------------------
 def ask_llm(client, topic):
     prompt = PROMPT.format(topic=topic, today=dt.date.today().isoformat(), days=LOOKBACK_DAYS)
-    resp = client.models.generate_content(
+    resp = client.chat.completions.create(
         model=MODEL,
-        contents=prompt,
-        config=types.GenerateContentConfig(
-            tools=[types.Tool(google_search=types.GoogleSearch())],
-            temperature=0.2,
-        ),
+        messages=[{"role": "user", "content": prompt}],
+        temperature=0.2,
     )
-    return parse_json_array(resp.text or "")
+    return parse_json_array(resp.choices[0].message.content or "")
 
 # ---- Normalize, filter, validate --------------------------------------------
 def normalize(raw, category):
@@ -72,7 +69,7 @@ def normalize(raw, category):
         "posted": raw.get("posted_date"),
         "url": (raw.get("apply_url") or "").strip(),
         "type": raw.get("type") or category,
-        "id": "",  # set in collect() after the URL is resolved
+        "id": "",  # set in collect() after the URL is checked
     }
 
 def in_window(posted, days=LOOKBACK_DAYS):
@@ -86,7 +83,7 @@ def in_window(posted, days=LOOKBACK_DAYS):
     return dt.date.today() - d <= dt.timedelta(days=days)
 
 def check_url(url):
-    """Follow redirects (including Google's grounding links) and return the final URL, or None."""
+    """Follow redirects and return the final URL if the page is reachable, else None."""
     if not url.startswith("https://"):
         return None
     try:
@@ -103,7 +100,9 @@ def check_url(url):
 
 def collect(client, categories=CATEGORIES):
     raw_jobs = []
-    for name, topic in categories.items():
+    for i, (name, topic) in enumerate(categories.items()):
+        if i:
+            time.sleep(SLEEP_BETWEEN)
         try:
             for raw in ask_llm(client, topic):
                 job = normalize(raw, name)
@@ -114,7 +113,7 @@ def collect(client, categories=CATEGORIES):
 
     seen, out = set(), []
     for j in raw_jobs:
-        final = check_url(j["url"])          # resolves Google redirect links too
+        final = check_url(j["url"])
         if not final:
             continue
         j["url"] = final
@@ -154,7 +153,7 @@ def send_email(blocks):
 
 # ---- Main -------------------------------------------------------------------
 def main():
-    client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
+    client = Groq(api_key=os.environ["GROQ_API_KEY"])
     db = sqlite3.connect(DB_PATH)
     db.execute("CREATE TABLE IF NOT EXISTS seen (id TEXT PRIMARY KEY)")
 

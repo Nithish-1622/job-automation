@@ -143,20 +143,27 @@ def format_job(j):
             f"Role - {j['title']}\n"
             f"Apply Link - {j['url']}\n")
 
+
 def send_email(blocks):
     user = os.environ["GMAIL_USER"]
     pwd = os.environ["GMAIL_APP_PASSWORD"]
-    to = os.environ["COORD_EMAIL"]
+    coord = os.environ["COORD_EMAIL"]
+    owner = os.environ.get("MAIL_TO", user)  # your own copy
+
+    # Send to the coordinator, with you in Cc. Skip the duplicate if they're the same address.
+    recipients = list(dict.fromkeys([coord, owner]))
 
     body = f"{len(blocks)} new fresher/intern software roles\n\n" + "\n".join(blocks)
     msg = MIMEText(body, "plain", "utf-8")
     msg["Subject"] = f"[Placement] {len(blocks)} new fresher/intern roles"
     msg["From"] = user
-    msg["To"] = to
+    msg["To"] = coord
+    if owner != coord:
+        msg["Cc"] = owner
 
     with smtplib.SMTP_SSL("smtp.gmail.com", 465, timeout=TIMEOUT) as s:
         s.login(user, pwd)
-        s.sendmail(user, [to], msg.as_string())
+        s.sendmail(user, recipients, msg.as_string())
 
 # ---- Main -------------------------------------------------------------------
 def main():

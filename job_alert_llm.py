@@ -1,31 +1,33 @@
 import os, re, json, time, sqlite3, smtplib, hashlib, datetime as dt
 from email.mime.text import MIMEText
+from urllib.parse import urlparse
 import requests
 from groq import Groq
+import job_alert as direct   # Level 1: company career-board APIs (deterministic)
 
 MODEL = "openai/gpt-oss-120b"   # verified with browser_search on your account
 LOOKBACK_DAYS = 7
 MAX_PER_RUN = 60
+MAX_PER_DOMAIN = 8              # stops one site (e.g. Unstop) from filling the email
 TIMEOUT = 20
-SLEEP_BETWEEN = 5               # seconds between categories, to respect free-tier limits
+SLEEP_BETWEEN = 5
 HEADERS = {"User-Agent": "Mozilla/5.0 (placement-alert)"}
 DB_PATH = "seen_llm.db"         # separate from seen.db used by job_alert.py
 
-CATEGORIES = {
-    "jobs": "full-time fresher and graduate software engineer, AI/ML engineer and developer "
-            "jobs in India offered by top MNCs and product companies for 2028, 2029 or 2030 batch graduates",
-    "internships": "software developer, AI/ML and data internships in India at top companies "
-                   "and startups, paid or with a stipend",
-    "hackathons": "hackathons and coding challenges in India listed on Unstop, Devfolio, "
-                  "Hackathon.io or Devpost that offer a job, internship or pre-placement offer",
-    "campus": "campus recruitment drives and off-campus hiring for 2028, 2029 or 2030 batch in India",
+# Level 2 to 4: each level searches only its named sources
+LEVELS = {
+    "L2": "Work at a Startup (workatastartup.com, Y Combinator) and career pages of "
+          "Y Combinator and well-known Indian startups",
+    "L3": "Internshala, Cutshort, Instahyre and Unstop job listings",
+    "L4": "MLH (mlh.io), Devfolio, Hackathon.io and Devpost hackathons that offer a "
+          "pre-placement offer, job or internship",
 }
 
-PROMPT = """Search the web for {topic}.
-Today is {today}. Only include opportunities posted within the last {days} days.
+PROMPT = """Search the web for software engineer, AI/ML and developer roles in India
+for fresher, intern, or 2028/2029/2030 batch graduate opportunities.
 
-Prefer official company career pages and platform listings (Unstop, Devfolio, company
-careers pages). Apply links must open the actual posting, not an ad or a redirect page.
+Use ONLY these sources: {sources}
+Today is {today}. Only include items posted within the last {days} days.
 
 Return ONLY a JSON array, with no prose and no markdown. Each item must have these keys:
 - "company": organization name
@@ -36,13 +38,12 @@ Return ONLY a JSON array, with no prose and no markdown. Each item must have the
 - "posted_date": YYYY-MM-DD if known, else null
 - "apply_url": direct URL to the posting
 
-If you find nothing, return []. Never invent URLs or details. Omit anything you did not see in a search result."""
+Return at most 10 items. If you find nothing, return []. Never invent URLs or details."""
 
 CITATION_RE = re.compile(r"【[^】]*】")
 
 # ---- Parse model output -----------------------------------------------------
 def parse_json_array(text):
-    """Remove citation markers, then decode the first JSON array in the reply."""
     text = CITATION_RE.sub("", text or "").strip()
     try:
         data = json.loads(text)
@@ -58,9 +59,9 @@ def parse_json_array(text):
         return []
     return [d for d in data if isinstance(d, dict)]
 
-# ---- LLM web search (gpt-oss-120b with browser_search) ----------------------
-def ask_llm(client, topic):
-    prompt = PROMPT.format(topic=topic, today=dt.date.today().isoformat(), days=LOOKBACK_DAYS)
+# ---- LLM web search (Level 2 to 4) ------------------------------------------
+def ask_llm(client, sources):
+    prompt = PROMPT.format(sources=sources, today=dt.date.today().isoformat(), days=LOOKBACK_DAYS)
     resp = client.chat.completions.create(
         model=MODEL,
         messages=[{"role": "user", "content": prompt}],
@@ -70,8 +71,34 @@ def ask_llm(client, topic):
     )
     return parse_json_array(resp.choices[0].message.content or "")
 
+# ---- Level 1: company career boards (direct, from job_alert.py) -------------
+def to_iso_date(v):
+    s = str(v or "").strip()
+    if re.fullmatch(r"\d{13}", s):                       # Lever epoch milliseconds
+        return dt.datetime.fromtimestamp(int(s) / 1000, dt.timezone.utc).date().isoformat()
+    return s[:10] if re.match(r"\d{4}-\d{2}-\d{2}", s) else None
+
+def collect_direct():
+    out = []
+    for c in direct.COMPANIES:
+        for j in direct.safe_fetch(c):
+            if not direct.target(j):
+                continue
+            out.append({
+                "company": j["company"],
+                "role": j["title"],
+                "ctc": j.get("ctc", "Not disclosed"),
+                "batch": j.get("batch", "Not stated"),
+                "posted": to_iso_date(j.get("posted")),
+                "url": j["url"],
+                "type": "job",
+                "tier": "L1",
+                "id": "",
+            })
+    return out
+
 # ---- Normalize, filter, validate --------------------------------------------
-def normalize(raw, category):
+def normalize(raw, tier):
     return {
         "company": raw.get("company") or "Unknown",
         "role": raw.get("role") or "Unknown",
@@ -79,7 +106,8 @@ def normalize(raw, category):
         "batch": raw.get("batch") or "Not stated",
         "posted": raw.get("posted_date"),
         "url": (raw.get("apply_url") or "").strip(),
-        "type": raw.get("type") or category,
+        "type": raw.get("type") or "job",
+        "tier": tier,
         "id": "",  # set in collect() after the URL is checked
     }
 
@@ -109,21 +137,37 @@ def check_url(url):
         return final
     return None
 
-def collect(client, categories=CATEGORIES):
-    raw_jobs = []
-    for i, (name, topic) in enumerate(categories.items()):
+def cap_per_domain(jobs):
+    """Limit LLM results per site. Level 1 company boards are never capped."""
+    counts, kept = {}, []
+    for j in jobs:
+        if j["tier"] == "L1":
+            kept.append(j)
+            continue
+        d = urlparse(j["url"]).netloc.lower()
+        if counts.get(d, 0) >= MAX_PER_DOMAIN:
+            continue
+        counts[d] = counts.get(d, 0) + 1
+        kept.append(j)
+    return kept
+
+def collect(client):
+    raw = collect_direct()                      # Level 1 first, so it fills the list first
+    print(f"L1 direct: {len(raw)} relevant listings")
+
+    for i, (tier, sources) in enumerate(LEVELS.items()):
         if i:
             time.sleep(SLEEP_BETWEEN)
         try:
-            for raw in ask_llm(client, topic):
-                job = normalize(raw, name)
-                if job["url"] and in_window(job["posted"]):
-                    raw_jobs.append(job)
-        except Exception as e:  # one failing category must not stop the run
-            print(f"[warn] {name} search failed: {e}")
+            for r in ask_llm(client, sources):
+                j = normalize(r, tier)
+                if j["url"] and in_window(j["posted"]):
+                    raw.append(j)
+        except Exception as e:  # one failing level must not stop the run
+            print(f"[warn] {tier} search failed: {e}")
 
-    seen, out = set(), []
-    for j in raw_jobs:
+    out, seen = [], set()
+    for j in raw:
         final = check_url(j["url"])
         if not final:
             continue
@@ -133,7 +177,7 @@ def collect(client, categories=CATEGORIES):
             continue
         seen.add(j["id"])
         out.append(j)
-    return out
+    return cap_per_domain(out)
 
 # ---- Notify -----------------------------------------------------------------
 def format_job(j):
@@ -142,14 +186,16 @@ def format_job(j):
             f"Role - {j['role']}\n"
             f"Apply Link - {j['url']}\n")
 
-def send_email(blocks):
+def send_email(blocks, tier_counts):
     user = os.environ["GMAIL_USER"]
     pwd = os.environ["GMAIL_APP_PASSWORD"]
     coord = os.environ["COORD_EMAIL"]
     owner = os.environ.get("MAIL_TO", user)
 
     recipients = list(dict.fromkeys([coord, owner]))
-    body = f"{len(blocks)} new opportunities from the last {LOOKBACK_DAYS} days\n\n" + "\n".join(blocks)
+    summary = ", ".join(f"{t}: {n}" for t, n in tier_counts.items())
+    body = (f"{len(blocks)} new opportunities from the last {LOOKBACK_DAYS} days\n"
+            f"({summary})\n\n" + "\n".join(blocks))
 
     msg = MIMEText(body, "plain", "utf-8")
     msg["Subject"] = f"[Placement] {len(blocks)} new opportunities"
@@ -172,10 +218,14 @@ def main():
     fresh = [j for j in jobs
              if not db.execute("SELECT 1 FROM seen WHERE id=?", (j["id"],)).fetchone()]
     fresh = fresh[:MAX_PER_RUN]
-    print(f"Validated {len(jobs)}, new {len(fresh)}")
+
+    tier_counts = {}
+    for j in fresh:
+        tier_counts[j["tier"]] = tier_counts.get(j["tier"], 0) + 1
+    print(f"Validated {len(jobs)}, new {len(fresh)}, by tier: {tier_counts}")
 
     if fresh:
-        send_email([format_job(j) for j in fresh])  # if this raises, nothing is marked seen
+        send_email([format_job(j) for j in fresh], tier_counts)  # if this raises, nothing is marked seen
         db.executemany("INSERT OR IGNORE INTO seen (id) VALUES (?)",
                        [(j["id"],) for j in fresh])
         db.commit()

@@ -1,0 +1,30 @@
+name: Daily LLM Opportunity Alert
+
+on:
+  schedule:
+    - cron: "45 3 * * *"     # 03:45 UTC = 09:15 IST (staggered from the other workflow)
+  workflow_dispatch:
+
+jobs:
+  alert:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - run: pip install requests google-genai
+
+      # Separate cache prefix so it never collides with seen.db from job-alert.yml
+      - uses: actions/cache@v4
+        with:
+          path: seen_llm.db
+          key: seen-llm-${{ github.run_id }}
+          restore-keys: seen-llm-
+
+      - run: python job_alert_llm.py
+        env:
+          GEMINI_API_KEY:     ${{ secrets.GEMINI_API_KEY }}
+          GMAIL_USER:         ${{ secrets.GMAIL_USER }}
+          GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
+          COORD_EMAIL:        ${{ secrets.COORD_EMAIL }}
+          MAIL_TO:            ${{ secrets.MAIL_TO }}

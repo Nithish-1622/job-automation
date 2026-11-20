@@ -3,13 +3,13 @@ from email.mime.text import MIMEText
 import requests
 from groq import Groq
 
-MODEL = "groq/compound"      # Groq model with built-in web search; verify at console.groq.com/docs/models
+MODEL = "openai/gpt-oss-120b"   # verified with browser_search on your account
 LOOKBACK_DAYS = 7
 MAX_PER_RUN = 60
 TIMEOUT = 20
-SLEEP_BETWEEN = 5            # seconds between categories, to respect free-tier per-minute limits
+SLEEP_BETWEEN = 5               # seconds between categories, to respect free-tier limits
 HEADERS = {"User-Agent": "Mozilla/5.0 (placement-alert)"}
-DB_PATH = "seen_llm.db"      # separate from seen.db used by job_alert.py
+DB_PATH = "seen_llm.db"         # separate from seen.db used by job_alert.py
 
 CATEGORIES = {
     "jobs": "full-time fresher and graduate software engineer, AI/ML engineer and developer "
@@ -38,24 +38,35 @@ Return ONLY a JSON array, with no prose and no markdown. Each item must have the
 
 If you find nothing, return []. Never invent URLs or details. Omit anything you did not see in a search result."""
 
+CITATION_RE = re.compile(r"【[^】]*】")
+
 # ---- Parse model output -----------------------------------------------------
 def parse_json_array(text):
-    m = re.search(r"\[.*\]", text, re.S)
-    if not m:
-        return []
+    """Remove citation markers, then decode the first JSON array in the reply."""
+    text = CITATION_RE.sub("", text or "").strip()
     try:
-        data = json.loads(m.group(0))
+        data = json.loads(text)
     except json.JSONDecodeError:
+        start = text.find("[")
+        if start == -1:
+            return []
+        try:
+            data, _ = json.JSONDecoder().raw_decode(text[start:])
+        except json.JSONDecodeError:
+            return []
+    if not isinstance(data, list):
         return []
     return [d for d in data if isinstance(d, dict)]
 
-# ---- LLM web search (Groq compound model) -----------------------------------
+# ---- LLM web search (gpt-oss-120b with browser_search) ----------------------
 def ask_llm(client, topic):
     prompt = PROMPT.format(topic=topic, today=dt.date.today().isoformat(), days=LOOKBACK_DAYS)
     resp = client.chat.completions.create(
         model=MODEL,
         messages=[{"role": "user", "content": prompt}],
-        temperature=0.2,
+        tools=[{"type": "browser_search"}],
+        reasoning_effort="low",
+        max_completion_tokens=4096,
     )
     return parse_json_array(resp.choices[0].message.content or "")
 

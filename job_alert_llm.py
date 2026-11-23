@@ -186,23 +186,32 @@ def format_job(j):
             f"Role - {j['role']}\n"
             f"Apply Link - {j['url']}\n")
 
-def send_email(blocks, tier_counts):
+TEST_MODE = os.environ.get("TEST_MODE") == "1"
+
+def send_email(blocks, tier_counts, test=False):
     user = os.environ["GMAIL_USER"]
     pwd = os.environ["GMAIL_APP_PASSWORD"]
-    coord = os.environ["COORD_EMAIL"]
     owner = os.environ.get("MAIL_TO", user)
 
-    recipients = list(dict.fromkeys([coord, owner]))
+    if test:
+        to, cc, recipients = owner, None, [owner]
+        prefix = "[TEST] "
+    else:
+        coord = os.environ["COORD_EMAIL"]
+        to, cc = coord, (owner if owner != coord else None)
+        recipients = list(dict.fromkeys([coord, owner]))
+        prefix = ""
+
     summary = ", ".join(f"{t}: {n}" for t, n in tier_counts.items())
-    body = (f"{len(blocks)} new opportunities from the last {LOOKBACK_DAYS} days\n"
+    body = (f"{len(blocks)} opportunities from the last {LOOKBACK_DAYS} days\n"
             f"({summary})\n\n" + "\n".join(blocks))
 
     msg = MIMEText(body, "plain", "utf-8")
-    msg["Subject"] = f"[Placement] {len(blocks)} new opportunities"
+    msg["Subject"] = f"{prefix}[Placement] {len(blocks)} opportunities"
     msg["From"] = user
-    msg["To"] = coord
-    if owner != coord:
-        msg["Cc"] = owner
+    msg["To"] = to
+    if cc:
+        msg["Cc"] = cc
 
     with smtplib.SMTP_SSL("smtp.gmail.com", 465, timeout=TIMEOUT) as s:
         s.login(user, pwd)
@@ -215,21 +224,27 @@ def main():
     db.execute("CREATE TABLE IF NOT EXISTS seen (id TEXT PRIMARY KEY)")
 
     jobs = collect(client)
-    fresh = [j for j in jobs
-             if not db.execute("SELECT 1 FROM seen WHERE id=?", (j["id"],)).fetchone()]
+    if TEST_MODE:
+        fresh = jobs                       # every 7-day result, ignoring history
+    else:
+        fresh = [j for j in jobs
+                 if not db.execute("SELECT 1 FROM seen WHERE id=?", (j["id"],)).fetchone()]
     fresh = fresh[:MAX_PER_RUN]
 
     tier_counts = {}
     for j in fresh:
         tier_counts[j["tier"]] = tier_counts.get(j["tier"], 0) + 1
-    print(f"Validated {len(jobs)}, new {len(fresh)}, by tier: {tier_counts}")
+    print(f"Mode: {'TEST' if TEST_MODE else 'LIVE'} | Validated {len(jobs)}, "
+          f"to send {len(fresh)}, by tier: {tier_counts}")
 
     if fresh:
-        send_email([format_job(j) for j in fresh], tier_counts)  # if this raises, nothing is marked seen
-        db.executemany("INSERT OR IGNORE INTO seen (id) VALUES (?)",
-                       [(j["id"],) for j in fresh])
-        db.commit()
+        send_email([format_job(j) for j in fresh], tier_counts, test=TEST_MODE)
+        if not TEST_MODE:                  # only live runs record what was sent
+            db.executemany("INSERT OR IGNORE INTO seen (id) VALUES (?)",
+                           [(j["id"],) for j in fresh])
+            db.commit()
     db.close()
+
 
 if __name__ == "__main__":
     main()

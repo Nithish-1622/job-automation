@@ -4,6 +4,11 @@ on:
   schedule:
     - cron: "45 3 * * *"     # 03:45 UTC = 09:15 IST
   workflow_dispatch:
+    inputs:
+      test_mode:
+        description: "Test: send all 7-day results to MAIL_TO only, ignore seen DB"
+        type: boolean
+        default: false
 
 jobs:
   alert:
@@ -27,3 +32,4 @@ jobs:
           GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
           COORD_EMAIL:        ${{ secrets.COORD_EMAIL }}
           MAIL_TO:            ${{ secrets.MAIL_TO }}
+          TEST_MODE:          ${{ inputs.test_mode && '1' || '0' }}

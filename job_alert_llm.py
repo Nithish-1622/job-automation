@@ -6,7 +6,7 @@ from groq import Groq
 import job_alert as direct   # Level 1: company career-board APIs (deterministic)
 
 MODEL = "openai/gpt-oss-120b"   # verified with browser_search on your account
-LOOKBACK_DAYS = 7
+LOOKBACK_DAYS = 30
 MAX_PER_RUN = 60
 MAX_PER_DOMAIN = 8              # stops one site (e.g. Unstop) from filling the email
 TIMEOUT = 20
@@ -16,17 +16,20 @@ DB_PATH = "seen_llm.db"         # separate from seen.db used by job_alert.py
 
 # Level 2 to 4: each level searches only its named sources
 LEVELS = {
+    "L0": "official careers pages of any company in India: MNCs, product companies, "
+          "banks, consultancies, global tech firms with India offices",
     "L2": "Work at a Startup (workatastartup.com, Y Combinator) and career pages of "
           "Y Combinator and well-known Indian startups",
-    "L3": "Internshala, Cutshort, Instahyre and Unstop job listings",
+    "L3": "Cutshort, Instahyre and Unstop job listings",
     "L4": "MLH (mlh.io), Devfolio, Hackathon.io and Devpost hackathons that offer a "
           "pre-placement offer, job or internship",
 }
 
-PROMPT = """Search the web for software engineer, AI/ML and developer roles in India
+PROMPT = """Search the web for software engineer, AI/ML, data and developer roles in India
 for fresher, intern, or 2028/2029/2030 batch graduate opportunities.
 
-Use ONLY these sources: {sources}
+Focus on: {sources}
+Prefer these sources, but use any other reputable source you find.
 Today is {today}. Only include items posted within the last {days} days.
 
 Return ONLY a JSON array, with no prose and no markdown. Each item must have these keys:
@@ -38,7 +41,8 @@ Return ONLY a JSON array, with no prose and no markdown. Each item must have the
 - "posted_date": YYYY-MM-DD if known, else null
 - "apply_url": direct URL to the posting
 
-Return at most 10 items. If you find nothing, return []. Never invent URLs or details."""
+Return up to 15 items. List every match you find within the window, not just the first few.
+If you find nothing, return []. Never invent URLs or details."""
 
 CITATION_RE = re.compile(r"【[^】]*】")
 
@@ -66,7 +70,7 @@ def ask_llm(client, sources):
         model=MODEL,
         messages=[{"role": "user", "content": prompt}],
         tools=[{"type": "browser_search"}],
-        reasoning_effort="low",
+        reasoning_effort="medium",
         max_completion_tokens=4096,
     )
     return parse_json_array(resp.choices[0].message.content or "")
